@@ -1,10 +1,12 @@
+use std::{os::fd::{ AsRawFd, FromRawFd, OwnedFd}};
+
 use anyhow::Context;
 
+use libc::{getegid, geteuid};
 use nix::{
-    mount::{MsFlags, mount},
     sched::{CloneFlags, clone},
     sys::signal::Signal,
-    unistd::Pid,
+    unistd::{Pid, pipe, close, read, write},
 };
 
 const STACK_SIZE: usize = 1024 * 1024;
@@ -25,15 +27,6 @@ fn child(command: &str, args: &[String]) -> anyhow::Result<()> {
         c_args.push(CString::new(arg.as_str()).context("failed to convert argument to CString")?);
     }
 
-    mount(
-        Some("proc"),
-        "/proc",
-        None::<&str>,
-        MsFlags::empty(),
-        None::<&str>,
-    )
-    .context("failed to mount procfs")?;
-
     // execvp replaces the current process, so this only returns on error
     execvp(&cmd_cstring, &c_args).context("failed to execute command")?;
 
@@ -43,13 +36,36 @@ fn child(command: &str, args: &[String]) -> anyhow::Result<()> {
 
 pub fn run_in_container(command: &str, args: &[String]) -> anyhow::Result<()> {
     // clone flags
-    let clone_flags = CloneFlags::CLONE_NEWPID;
+    let clone_flags = CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWUSER;
     // allocate stack for the child process
     let mut stack = vec![0u8; STACK_SIZE];
+
+    let (read_fd, write_fd) = pipe()?;
+
+    // convert to raw FD - I can't figure out how to trick borrow checked into allowing copying OwnedFd into the child
+    let child_read_fd = read_fd.as_raw_fd();
+    let child_write_fd = write_fd.as_raw_fd();
 
     let child_pid = unsafe {
         clone(
             Box::new(move || {
+                // restore OwnedFd from raw FD
+                let read_fd = OwnedFd::from_raw_fd(child_read_fd);
+                let write_fd = OwnedFd::from_raw_fd(child_write_fd);
+
+                // close writing part - we don't need it
+                if let Err(e) = close(write_fd) {
+                    eprint!("failed to close pipe {}", e);
+                    return 1;
+                }
+
+                // wait for the parent
+                let mut buf = [0u8];
+                if let Err(e) = read(read_fd, &mut buf) {
+                    eprint!("failed to sync with parent {}", e);
+                    return 1;
+                }
+
                 // This runs in the child process with PID 1 in the new namespace
                 if let Err(e) = child(command, args) {
                     eprintln!("child process failed: {}", e);
@@ -63,6 +79,19 @@ pub fn run_in_container(command: &str, args: &[String]) -> anyhow::Result<()> {
         )
     }
     .context("Failed to clone process")?;
+
+    close(read_fd)?;
+
+    let uid = unsafe { geteuid() };
+    let gid = unsafe { getegid() };
+
+    write_proc_file(child_pid, "uid_map", &format!("0 {} 1\n", uid))?;
+    write_proc_file(child_pid, "setgroups", "deny\n")?;
+    write_proc_file(child_pid, "gid_map", &format!("0 {} 1\n", gid))?;
+
+    write(&write_fd, b"1")?;
+    close(write_fd)?;
+
 
     println!("started child with PID={}", child_pid);
     let _ = wait_for_child(child_pid);
@@ -80,4 +109,10 @@ fn wait_for_child(pid: Pid) -> anyhow::Result<i32> {
     };
 
     result
+}
+
+fn write_proc_file(child_pid: Pid, file_name: &str, data: &str) -> anyhow::Result<()> {
+    let path = format!("/proc/{}/{}", child_pid, file_name);
+    std::fs::write(&path, data).with_context(|| format!("failed to write to {}", path))?;
+    Ok(())
 }
