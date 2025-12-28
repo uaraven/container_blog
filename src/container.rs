@@ -1,17 +1,52 @@
-use std::{os::fd::{ AsRawFd, FromRawFd, OwnedFd}};
+use std::{
+    fs::create_dir_all,
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+};
 
 use anyhow::Context;
 
 use libc::{getegid, geteuid};
 use nix::{
+    mount::{MsFlags, mount},
     sched::{CloneFlags, clone},
     sys::signal::Signal,
-    unistd::{Pid, pipe, close, read, write},
+    unistd::{Pid, chdir, close, pipe, pivot_root, read, write},
 };
 
 const STACK_SIZE: usize = 1024 * 1024;
 
 fn child(command: &str, args: &[String]) -> anyhow::Result<()> {
+    mount(
+        None::<&str>,
+        "/",
+        None::<&str>,
+        MsFlags::MS_REC | MsFlags::MS_PRIVATE,
+        None::<&str>,
+    )
+    .context("private propagation for /")?;
+
+    mount(
+        Some("rootfs"),
+        "rootfs",
+        None::<&str>,
+        MsFlags::MS_BIND | MsFlags::MS_REC,
+        None::<&str>,
+    )
+    .context("bind mount rootfs")?;
+
+    create_dir_all("rootfs/old_root").context("create old_root")?;
+    pivot_root("rootfs", "rootfs/old_root").context("pivot_root")?;
+    chdir("/").context("chdir to /")?;
+
+    mount(
+        Some("proc"),
+        "proc",
+        Some("proc"),
+        MsFlags::empty(),
+        None::<&str>,
+    )
+    .context("mount /proc")?;
+
     use nix::unistd::execvp;
     use std::ffi::CString;
 
@@ -36,7 +71,8 @@ fn child(command: &str, args: &[String]) -> anyhow::Result<()> {
 
 pub fn run_in_container(command: &str, args: &[String]) -> anyhow::Result<()> {
     // clone flags
-    let clone_flags = CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWUSER;
+    let clone_flags =
+        CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS;
     // allocate stack for the child process
     let mut stack = vec![0u8; STACK_SIZE];
 
@@ -68,7 +104,7 @@ pub fn run_in_container(command: &str, args: &[String]) -> anyhow::Result<()> {
 
                 // This runs in the child process with PID 1 in the new namespace
                 if let Err(e) = child(command, args) {
-                    eprintln!("child process failed: {}", e);
+                    eprintln!("child process failed: {:#}", e);
                     return 1;
                 };
                 return 0;
@@ -91,7 +127,6 @@ pub fn run_in_container(command: &str, args: &[String]) -> anyhow::Result<()> {
 
     write(&write_fd, b"1")?;
     close(write_fd)?;
-
 
     println!("started child with PID={}", child_pid);
     let _ = wait_for_child(child_pid);
