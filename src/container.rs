@@ -1,6 +1,8 @@
 use std::{
-    fs::create_dir_all,
+    fs::{create_dir_all, remove_dir, remove_dir_all},
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    path::Path,
+    process::Command,
 };
 
 use anyhow::Context;
@@ -16,37 +18,7 @@ use nix::{
 const STACK_SIZE: usize = 1024 * 1024;
 
 fn child(command: &str, args: &[String]) -> anyhow::Result<()> {
-    mount(
-        None::<&str>,
-        "/",
-        None::<&str>,
-        MsFlags::MS_REC | MsFlags::MS_PRIVATE,
-        None::<&str>,
-    )
-    .context("private propagation for /")?;
-
-    mount(
-        Some("rootfs"),
-        "rootfs",
-        None::<&str>,
-        MsFlags::MS_BIND | MsFlags::MS_REC,
-        None::<&str>,
-    )
-    .context("bind mount rootfs")?;
-
-    create_dir_all("rootfs/old_root").context("create old_root")?;
-    pivot_root("rootfs", "rootfs/old_root").context("pivot_root")?;
-    chdir("/").context("chdir to /")?;
-    umount2("rootfs/old_root", MntFlags::MNT_DETACH).context("umount old_root")?;
-
-    mount(
-        Some("proc"),
-        "proc",
-        Some("proc"),
-        MsFlags::empty(),
-        None::<&str>,
-    )
-    .context("mount /proc")?;
+    create_container_filesystem("fs")?;
 
     use nix::unistd::execvp;
     use std::ffi::CString;
@@ -151,4 +123,109 @@ fn write_proc_file(child_pid: Pid, file_name: &str, data: &str) -> anyhow::Resul
     let path = format!("/proc/{}/{}", child_pid, file_name);
     std::fs::write(&path, data).with_context(|| format!("failed to write to {}", path))?;
     Ok(())
+}
+
+/// Create the container's filesystem.
+/// Expects the root directory to exist and contain layout:
+///  - rootfs/
+///  - layerXX/
+///  - upper/
+///  - work/
+///  - merged/
+///
+/// See [fs readme](fs/readme.md) for details
+fn create_container_filesystem(root: &str) -> anyhow::Result<()> {
+    // change the root fs propagation to private
+    mount(
+        None::<&str>,
+        "/",
+        None::<&str>,
+        MsFlags::MS_REC | MsFlags::MS_PRIVATE,
+        None::<&str>,
+    )
+    .context("private propagation for /")?;
+
+    let rootfs = Path::new(root).join("rootfs");
+
+    mount(
+        Some(&rootfs),
+        &rootfs,
+        None::<&str>,
+        MsFlags::MS_BIND | MsFlags::MS_REC,
+        None::<&str>,
+    )
+    .context("bind mount rootfs")?;
+
+    let proc = rootfs.join("proc");
+    mount(
+        Some("proc"),
+        &proc,
+        Some("proc"),
+        MsFlags::empty(),
+        None::<&str>,
+    )
+    .context("mount /proc")?;
+
+    // prepare for pivot_root
+    let old_root = rootfs.join(".old_root");
+    if old_root.exists() {
+        remove_dir_all(&old_root).context("remove old_root")?;
+    }
+    create_dir_all(&old_root).context("create old_root")?;
+
+    // pivot_root and unmount old_root
+    pivot_root(&rootfs, &old_root).context("pivot_root")?;
+    chdir("/").context("chdir to /")?;
+    umount2("/.old_root", MntFlags::MNT_DETACH).context("umount old_root")?;
+    let _ = remove_dir("/.old_root");
+
+    Ok(())
+}
+
+/// Execute a command with arguments, wait for its termination,
+/// and return `anyhow::Result<()>`.
+///
+/// - `cmd`: the program to execute (e.g., "ls")
+/// - `args`: the arguments to pass to the program (e.g., &["-la"])
+pub fn execute_command(cmd: &str, args: &[&str]) -> anyhow::Result<()> {
+    let status = Command::new(cmd)
+        .args(args)
+        .status()
+        .with_context(|| format!("failed to spawn command: {} {:?}", cmd, args))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        // Include exit code if available for better diagnostics
+        match status.code() {
+            Some(code) => anyhow::bail!(
+                "command '{}' {:?} exited with non-zero status: {}",
+                cmd,
+                args,
+                code
+            ),
+            None => anyhow::bail!("command '{}' {:?} terminated by signal", cmd, args),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runs_successfully() {
+        // This should succeed on Unix-like systems
+        execute_command("true", &[]).expect("command should succeed");
+    }
+
+    #[test]
+    fn fails_as_expected() {
+        // This should fail on Unix-like systems
+        let err = execute_command("false", &[]).unwrap_err();
+        assert!(
+            format!("{err}").contains("non-zero"),
+            "unexpected error: {err}"
+        );
+    }
 }
