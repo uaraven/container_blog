@@ -7,7 +7,7 @@ use anyhow::Context;
 
 use libc::{getegid, geteuid};
 use nix::{
-    mount::{MsFlags, mount},
+    mount::{MntFlags, MsFlags, mount, umount2},
     sched::{CloneFlags, clone},
     sys::signal::Signal,
     unistd::{Pid, chdir, close, pipe, pivot_root, read, write},
@@ -37,6 +37,7 @@ fn child(command: &str, args: &[String]) -> anyhow::Result<()> {
     create_dir_all("rootfs/old_root").context("create old_root")?;
     pivot_root("rootfs", "rootfs/old_root").context("pivot_root")?;
     chdir("/").context("chdir to /")?;
+    umount2("rootfs/old_root", MntFlags::MNT_DETACH).context("umount old_root")?;
 
     mount(
         Some("proc"),
