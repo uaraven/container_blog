@@ -2,7 +2,6 @@ use std::{
     fs::{create_dir_all, remove_dir, remove_dir_all},
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     path::Path,
-    process::Command,
 };
 
 use anyhow::Context;
@@ -180,52 +179,4 @@ fn create_container_filesystem(root: &str) -> anyhow::Result<()> {
     let _ = remove_dir("/.old_root");
 
     Ok(())
-}
-
-/// Execute a command with arguments, wait for its termination,
-/// and return `anyhow::Result<()>`.
-///
-/// - `cmd`: the program to execute (e.g., "ls")
-/// - `args`: the arguments to pass to the program (e.g., &["-la"])
-pub fn execute_command(cmd: &str, args: &[&str]) -> anyhow::Result<()> {
-    let status = Command::new(cmd)
-        .args(args)
-        .status()
-        .with_context(|| format!("failed to spawn command: {} {:?}", cmd, args))?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        // Include exit code if available for better diagnostics
-        match status.code() {
-            Some(code) => anyhow::bail!(
-                "command '{}' {:?} exited with non-zero status: {}",
-                cmd,
-                args,
-                code
-            ),
-            None => anyhow::bail!("command '{}' {:?} terminated by signal", cmd, args),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn runs_successfully() {
-        // This should succeed on Unix-like systems
-        execute_command("true", &[]).expect("command should succeed");
-    }
-
-    #[test]
-    fn fails_as_expected() {
-        // This should fail on Unix-like systems
-        let err = execute_command("false", &[]).unwrap_err();
-        assert!(
-            format!("{err}").contains("non-zero"),
-            "unexpected error: {err}"
-        );
-    }
 }
