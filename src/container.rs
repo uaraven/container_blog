@@ -1,17 +1,24 @@
-use std::{os::fd::{ AsRawFd, FromRawFd, OwnedFd}};
+use std::{
+    fs::{create_dir_all, remove_dir, remove_dir_all},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    path::Path,
+};
 
 use anyhow::Context;
 
 use libc::{getegid, geteuid};
 use nix::{
+    mount::{MntFlags, MsFlags, mount, umount2},
     sched::{CloneFlags, clone},
     sys::signal::Signal,
-    unistd::{Pid, pipe, close, read, write},
+    unistd::{Pid, chdir, close, pipe, pivot_root, read, write},
 };
 
 const STACK_SIZE: usize = 1024 * 1024;
 
 fn child(command: &str, args: &[String]) -> anyhow::Result<()> {
+    create_container_filesystem("fs")?;
+
     use nix::unistd::execvp;
     use std::ffi::CString;
 
@@ -36,7 +43,8 @@ fn child(command: &str, args: &[String]) -> anyhow::Result<()> {
 
 pub fn run_in_container(command: &str, args: &[String]) -> anyhow::Result<()> {
     // clone flags
-    let clone_flags = CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWUSER;
+    let clone_flags =
+        CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS;
     // allocate stack for the child process
     let mut stack = vec![0u8; STACK_SIZE];
 
@@ -68,7 +76,7 @@ pub fn run_in_container(command: &str, args: &[String]) -> anyhow::Result<()> {
 
                 // This runs in the child process with PID 1 in the new namespace
                 if let Err(e) = child(command, args) {
-                    eprintln!("child process failed: {}", e);
+                    eprintln!("child process failed: {:#}", e);
                     return 1;
                 };
                 return 0;
@@ -92,7 +100,6 @@ pub fn run_in_container(command: &str, args: &[String]) -> anyhow::Result<()> {
     write(&write_fd, b"1")?;
     close(write_fd)?;
 
-
     println!("started child with PID={}", child_pid);
     let _ = wait_for_child(child_pid);
 
@@ -114,5 +121,62 @@ fn wait_for_child(pid: Pid) -> anyhow::Result<i32> {
 fn write_proc_file(child_pid: Pid, file_name: &str, data: &str) -> anyhow::Result<()> {
     let path = format!("/proc/{}/{}", child_pid, file_name);
     std::fs::write(&path, data).with_context(|| format!("failed to write to {}", path))?;
+    Ok(())
+}
+
+/// Create the container's filesystem.
+/// Expects the root directory to exist and contain layout:
+///  - rootfs/
+///  - layerXX/
+///  - upper/
+///  - work/
+///  - merged/
+///
+/// See [fs readme](fs/readme.md) for details
+fn create_container_filesystem(root: &str) -> anyhow::Result<()> {
+    // change the root fs propagation to private
+    mount(
+        None::<&str>,
+        "/",
+        None::<&str>,
+        MsFlags::MS_REC | MsFlags::MS_PRIVATE,
+        None::<&str>,
+    )
+    .context("private propagation for /")?;
+
+    let rootfs = Path::new(root).join("rootfs");
+
+    mount(
+        Some(&rootfs),
+        &rootfs,
+        None::<&str>,
+        MsFlags::MS_BIND | MsFlags::MS_REC,
+        None::<&str>,
+    )
+    .context("bind mount rootfs")?;
+
+    let proc = rootfs.join("proc");
+    mount(
+        Some("proc"),
+        &proc,
+        Some("proc"),
+        MsFlags::empty(),
+        None::<&str>,
+    )
+    .context("mount /proc")?;
+
+    // prepare for pivot_root
+    let old_root = rootfs.join(".old_root");
+    if old_root.exists() {
+        remove_dir_all(&old_root).context("remove old_root")?;
+    }
+    create_dir_all(&old_root).context("create old_root")?;
+
+    // pivot_root and unmount old_root
+    pivot_root(&rootfs, &old_root).context("pivot_root")?;
+    chdir("/").context("chdir to /")?;
+    umount2("/.old_root", MntFlags::MNT_DETACH).context("umount old_root")?;
+    let _ = remove_dir("/.old_root");
+
     Ok(())
 }
