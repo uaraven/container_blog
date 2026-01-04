@@ -9,7 +9,7 @@ Container will mount overlayfs with the lowerdir=rootfs plus any directory named
 `fs/upper` must exist and be empty - it will be used as upperdir for overlayfs. `fs/workdir` will be created to be used
 as a work directory. If workdir exists and is not empty it will be deleted and recreated.
 
-The resulting overlay filesystem will be mounted at `fs/merged`. This directory will be created automatically. If it exists it will be deleted and recreated.
+The resulting overlay filesystem will be mounted at `fs/mount`. This directory will be created automatically. If it exists it will be deleted and recreated.
 
 ## Filesystem layers
 

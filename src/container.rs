@@ -175,7 +175,7 @@ pub fn find_lower_layers(root: &str) -> anyhow::Result<String> {
                 && name.starts_with("layer")
                 && name.chars().skip(5).take(2).all(|c| c.is_ascii_digit());
             if is_match {
-                names.push(format!("{}/{}", root, name.to_string()));
+                names.push(format!("{}/{}", root, name));
             }
         }
     }
@@ -185,7 +185,7 @@ pub fn find_lower_layers(root: &str) -> anyhow::Result<String> {
 }
 
 /// Create the container's filesystem.
-/// See [fs readme](fs/readme.md) for details about directorylayout
+/// See [fs readme](fs/readme.md) for details about directory layout
 fn create_container_filesystem(root: &str) -> anyhow::Result<()> {
     // change the root fs propagation to private
     mount(
