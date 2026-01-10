@@ -1,25 +1,22 @@
-use std::{
-    fs::{create_dir_all, remove_dir, remove_dir_all},
-    os::fd::{AsRawFd, FromRawFd, OwnedFd},
-    path::Path,
-};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 use anyhow::Context;
 
 use libc::{getegid, geteuid};
 use nix::{
-    mount::{MntFlags, MsFlags, mount, umount2},
     sched::{CloneFlags, clone},
     sys::signal::Signal,
-    unistd::{Pid, chdir, close, pipe, pivot_root, read, write},
+    unistd::{Pid, close, pipe, read, write},
 };
+
+use crate::fs;
 
 const STACK_SIZE: usize = 1024 * 1024;
 
 fn child(command: &str, args: &[String]) -> anyhow::Result<()> {
-    create_container_filesystem("fs")?;
+    fs::create_container_filesystem("fs")?;
 
-    use nix::unistd::execvp;
+    use nix::unistd::execve;
     use std::ffi::CString;
 
     // Convert command to CString
@@ -34,17 +31,31 @@ fn child(command: &str, args: &[String]) -> anyhow::Result<()> {
         c_args.push(CString::new(arg.as_str()).context("failed to convert argument to CString")?);
     }
 
-    // execvp replaces the current process, so this only returns on error
-    execvp(&cmd_cstring, &c_args).context("failed to execute command")?;
+    // Build environment variables as CStrings: "KEY=VALUE"
+    let mut c_env: Vec<CString> = Vec::new();
+    for (key, value) in std::env::vars() {
+        let updated_value = if key == "PATH" {
+            // overwrite the PATH env variable to match alpine rootfs
+            String::from("/bin:/sbin:/usr/bin:/usr/sbin")
+        } else {
+            value
+        };
+        let pair = format!("{}={}", key, updated_value);
+        c_env.push(CString::new(pair).context("failed to convert env var to CString")?);
+    }
+    // execve replaces the current process, so this only returns on error
+    execve(&cmd_cstring, &c_args, &c_env).context("failed to execute command")?;
 
-    // This line is never reached if execvp succeeds
+    // This line is never reached if execve succeeds
     unreachable!()
 }
 
 pub fn run_in_container(command: &str, args: &[String]) -> anyhow::Result<()> {
     // clone flags
-    let clone_flags =
-        CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS;
+    let clone_flags = CloneFlags::CLONE_NEWPID
+        | CloneFlags::CLONE_NEWUSER
+        | CloneFlags::CLONE_NEWNS
+        | CloneFlags::CLONE_NEWNET;
     // allocate stack for the child process
     let mut stack = vec![0u8; STACK_SIZE];
 
@@ -121,119 +132,5 @@ fn wait_for_child(pid: Pid) -> anyhow::Result<i32> {
 fn write_proc_file(child_pid: Pid, file_name: &str, data: &str) -> anyhow::Result<()> {
     let path = format!("/proc/{}/{}", child_pid, file_name);
     std::fs::write(&path, data).with_context(|| format!("failed to write to {}", path))?;
-    Ok(())
-}
-
-fn recreate_dir<P: AsRef<Path>>(dir: P) -> anyhow::Result<()> {
-    if dir.as_ref().exists() {
-        std::fs::remove_dir_all(dir.as_ref())
-            .with_context(|| format!("failed to remove {:?}", dir.as_ref()))?;
-    }
-    std::fs::create_dir_all(dir.as_ref())
-        .with_context(|| format!("failed to create {:?}", dir.as_ref()))?;
-    Ok(())
-}
-
-fn create_overlay_dirs(root: &str) -> anyhow::Result<(String, String, String, String)> {
-    let lower_dirs = find_lower_layers(root)?;
-
-    let upper_dir = format!("{}/upper", root);
-    recreate_dir(&upper_dir)?;
-
-    let lower = if lower_dirs.is_empty() {
-        format!("{}/rootfs", root)
-    } else {
-        format!("{}/rootfs:{}", root, lower_dirs)
-    };
-
-    let workdir = Path::new(root).join("workdir");
-    let rootfs = Path::new(root).join("mount");
-    recreate_dir(&workdir)?;
-    recreate_dir(&rootfs)?;
-
-    Ok((
-        lower,
-        upper_dir,
-        workdir.to_string_lossy().to_string(),
-        rootfs.to_string_lossy().to_string(),
-    ))
-}
-
-pub fn find_lower_layers(root: &str) -> anyhow::Result<String> {
-    let mut names: Vec<String> = Vec::new();
-
-    for entry in std::fs::read_dir(root).context("failed to read root directory")? {
-        let entry = entry.context("failed to read directory entry")?;
-        let file_type = entry.file_type().context("failed to get file type")?;
-        if !file_type.is_dir() {
-            continue;
-        }
-        let os_name = entry.file_name();
-        if let Some(name) = os_name.to_str() {
-            // match "layer" followed by exactly two digits
-            let is_match = name.len() == 7
-                && name.starts_with("layer")
-                && name.chars().skip(5).take(2).all(|c| c.is_ascii_digit());
-            if is_match {
-                names.push(format!("{}/{}", root, name));
-            }
-        }
-    }
-
-    names.sort();
-    Ok(names.join(":"))
-}
-
-/// Create the container's filesystem.
-/// See [fs readme](fs/readme.md) for details about directory layout
-fn create_container_filesystem(root: &str) -> anyhow::Result<()> {
-    // change the root fs propagation to private
-    mount(
-        None::<&str>,
-        "/",
-        None::<&str>,
-        MsFlags::MS_REC | MsFlags::MS_PRIVATE,
-        None::<&str>,
-    )
-    .context("private propagation for /")?;
-
-    let (lower, upper, workdir, rootdir) = create_overlay_dirs(root)?;
-
-    let rootfs = Path::new(&rootdir);
-
-    let mount_opts = format!("lowerdir={},upperdir={},workdir={}", lower, upper, workdir);
-
-    mount(
-        Some("overlay"),
-        rootfs,
-        Some("overlay"),
-        MsFlags::empty(),
-        Some(mount_opts.as_str()),
-    )
-    .context("mount overlayfs")?;
-
-    let proc = rootfs.join("proc");
-    mount(
-        Some("proc"),
-        &proc,
-        Some("proc"),
-        MsFlags::empty(),
-        None::<&str>,
-    )
-    .context("mount /proc")?;
-
-    // prepare for pivot_root
-    let old_root = rootfs.join(".old_root");
-    if old_root.exists() {
-        remove_dir_all(&old_root).context("remove old_root")?;
-    }
-    create_dir_all(&old_root).context("create old_root")?;
-
-    // pivot_root and unmount old_root
-    pivot_root(rootfs, &old_root).context("pivot_root")?;
-    chdir("/").context("chdir to /")?;
-    umount2("/.old_root", MntFlags::MNT_DETACH).context("umount old_root")?;
-    let _ = remove_dir("/.old_root");
-
     Ok(())
 }
