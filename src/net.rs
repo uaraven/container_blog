@@ -11,7 +11,7 @@ const VETH_CONTAINER: &str = "veth0c0";
 
 /// executes ip command with arguments
 fn ip(args: &[&str]) -> anyhow::Result<()> {
-    Command::new("ip")
+    Command::new("/sbin/ip")
         .args(args)
         .output()
         .context(format!("Failed to execute ip {:?}", args))?;
@@ -50,11 +50,13 @@ fn create_veth_pair(container_ip: &Ipv4Addr) -> anyhow::Result<()> {
     .context("creating veth pair")?;
 
     // bring host side up
-    ip(&["link", "set", VETH_HOST, "up"]).context("bringing up host side")?;
+    ip(&["link", "set", "dev", VETH_HOST, "up"]).context("bringing up host side")?;
 
-    ip(&["link", "set", VETH_HOST, "master", BRIDGE_NAME])
+    // attach host veth side to the bridge interface
+    ip(&["link", "set", "dev", VETH_HOST, "master", BRIDGE_NAME])
         .context("attaching host side to the bridge")?;
 
+    // assign IP address to container veth side
     ip(&[
         "addr",
         "add",
@@ -67,7 +69,28 @@ fn create_veth_pair(container_ip: &Ipv4Addr) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(crate) fn setup_network(netw: &Ipv4Cidr, child_pid: Pid) -> anyhow::Result<()> {
+pub(crate) fn move_into_container(child_pid: Pid) -> anyhow::Result<()> {
+    // move child side to child namespace
+    let pid_s: String = child_pid.to_string();
+    ip(&[
+        "link",
+        "set",
+        "dev",
+        VETH_CONTAINER,
+        "netns",
+        pid_s.as_str(),
+    ])
+    .context("moving veth0c0 to child namespace")?;
+
+    Ok(())
+}
+
+/// setup the network on the host side:
+/// - create bridge and assign first address in the CIDR to the bridge interface
+/// - attach host veth side to the bridge interface
+/// - assign IP address to container veth side
+/// - move container veth side into container namespace
+pub(crate) fn setup_network_host(netw: &Ipv4Cidr) -> anyhow::Result<()> {
     let host_ip = netw
         .iter()
         .nth(1)
@@ -82,10 +105,26 @@ pub(crate) fn setup_network(netw: &Ipv4Cidr, child_pid: Pid) -> anyhow::Result<(
     create_bridge(&host_ip)?;
     create_veth_pair(&container_ip)?;
 
-    // move child side to child namespace
-    let pid_s: String = child_pid.to_string();
-    ip(&["link", "set", "dev", "veth0c0", "netns", pid_s.as_str()])
-        .context("moving veth0c0 to child namespace")?;
+    Ok(())
+}
+
+/// bring up the network on the container side:
+/// - bring up the container veth side, if the `veth` parameter is true
+/// - bring up the loopback interface
+pub(crate) fn bring_up_container_net(veth_up: bool) -> anyhow::Result<()> {
+    if veth_up {
+        // bring container side up
+        ip(&["link", "set", "dev", VETH_CONTAINER, "up"])
+            .context("bringing up container veth side")?;
+    }
+    ip(&["link", "set", "dev", "lo", "up"]).context("bringing up lo in container")?;
+
+    Ok(())
+}
+
+pub(crate) fn cleanup_network() -> anyhow::Result<()> {
+    ip(&["link", "delete", BRIDGE_NAME]).context("removing bridge device")?;
+    ip(&["link", "delete", VETH_HOST]).context("removing host veth side")?;
 
     Ok(())
 }

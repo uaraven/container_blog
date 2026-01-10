@@ -1,7 +1,11 @@
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::{
+    net::Ipv4Addr,
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+};
 
 use anyhow::Context;
 
+use cidr::Ipv4Cidr;
 use libc::{getegid, geteuid};
 use nix::{
     sched::{CloneFlags, clone},
@@ -10,11 +14,14 @@ use nix::{
 };
 
 use crate::fs;
+use crate::net;
 
 const STACK_SIZE: usize = 1024 * 1024;
 
-fn child(command: &str, args: &[String]) -> anyhow::Result<()> {
+fn child(command: &str, args: &[String], is_parent_root: bool) -> anyhow::Result<()> {
     fs::create_container_filesystem("fs")?;
+
+    net::bring_up_container_net(is_parent_root)?;
 
     use nix::unistd::execve;
     use std::ffi::CString;
@@ -59,6 +66,9 @@ pub fn run_in_container(command: &str, args: &[String]) -> anyhow::Result<()> {
     // allocate stack for the child process
     let mut stack = vec![0u8; STACK_SIZE];
 
+    let uid = unsafe { geteuid() };
+    let gid = unsafe { getegid() };
+
     let (read_fd, write_fd) = pipe()?;
 
     // convert to raw FD - I can't figure out how to trick borrow checked into allowing copying OwnedFd into the child
@@ -85,8 +95,10 @@ pub fn run_in_container(command: &str, args: &[String]) -> anyhow::Result<()> {
                     return 1;
                 }
 
+                let is_parent_root = uid == 0;
+
                 // This runs in the child process with PID 1 in the new namespace
-                if let Err(e) = child(command, args) {
+                if let Err(e) = child(command, args, is_parent_root) {
                     eprintln!("child process failed: {:#}", e);
                     return 1;
                 };
@@ -101,18 +113,26 @@ pub fn run_in_container(command: &str, args: &[String]) -> anyhow::Result<()> {
 
     close(read_fd)?;
 
-    let uid = unsafe { geteuid() };
-    let gid = unsafe { getegid() };
-
     write_proc_file(child_pid, "uid_map", &format!("0 {} 1\n", uid))?;
     write_proc_file(child_pid, "setgroups", "deny\n")?;
     write_proc_file(child_pid, "gid_map", &format!("0 {} 1\n", gid))?;
+
+    if uid == 0 {
+        let container_net_cidr =
+            Ipv4Cidr::new(Ipv4Addr::new(192, 160, 200, 0), 24).context("invalid CIDR")?;
+        net::setup_network_host(&container_net_cidr)?;
+        net::move_into_container(child_pid)?;
+    }
 
     write(&write_fd, b"1")?;
     close(write_fd)?;
 
     println!("started child with PID={}", child_pid);
     let _ = wait_for_child(child_pid);
+
+    if uid == 0 {
+        net::cleanup_network()?;
+    }
 
     Ok(())
 }
