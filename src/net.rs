@@ -18,6 +18,20 @@ fn ip(args: &[&str]) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn ips_from_cidr(netw: &Ipv4Cidr) -> anyhow::Result<(Ipv4Addr, Ipv4Addr)> {
+    let host_ip = netw
+        .iter()
+        .nth(1)
+        .context("get host address from cidr")?
+        .address();
+    let container_ip = netw
+        .iter()
+        .nth(2)
+        .context("get container address from cidr")?
+        .address();
+    Ok((host_ip, container_ip))
+}
+
 /// creates a bridge with the given IP address and brings the interface up
 fn create_bridge(ipaddr: &Ipv4Addr) -> anyhow::Result<()> {
     ip(&["link", "add", "name", BRIDGE_NAME, "type", "bridge"]).context("creating bridge")?;
@@ -75,20 +89,6 @@ pub(crate) fn move_into_container(child_pid: Pid) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn ips_from_cidr(netw: &Ipv4Cidr) -> anyhow::Result<(Ipv4Addr, Ipv4Addr)> {
-    let host_ip = netw
-        .iter()
-        .nth(1)
-        .context("get host address from cidr")?
-        .address();
-    let container_ip = netw
-        .iter()
-        .nth(2)
-        .context("get container address from cidr")?
-        .address();
-    Ok((host_ip, container_ip))
-}
-
 /// setup the network on the host side:
 /// - create bridge and assign first address in the CIDR to the bridge interface
 /// - attach host veth side to the bridge interface
@@ -106,10 +106,10 @@ pub(crate) fn setup_network_host(netw: &Ipv4Cidr) -> anyhow::Result<()> {
 /// bring up the network on the container side:
 /// - bring up the container veth side, if the `veth` parameter is true
 /// - bring up the loopback interface
-pub(crate) fn bring_up_container_net(netw: &Ipv4Cidr, veth_up: bool) -> anyhow::Result<()> {
+pub(crate) fn bring_up_container_net(netw: &Ipv4Cidr, is_root: bool) -> anyhow::Result<()> {
     let (host_ip, container_ip) = ips_from_cidr(netw)?;
 
-    if veth_up {
+    if is_root {
         // assign IP address to container veth side
         ip(&[
             "addr",
@@ -124,6 +124,7 @@ pub(crate) fn bring_up_container_net(netw: &Ipv4Cidr, veth_up: bool) -> anyhow::
         ip(&["link", "set", "dev", VETH_CONTAINER, "up"])
             .context("bringing up container veth side")?;
 
+        // configure default gateway
         ip(&[
             "route",
             "add",
@@ -142,7 +143,6 @@ pub(crate) fn bring_up_container_net(netw: &Ipv4Cidr, veth_up: bool) -> anyhow::
 
 pub(crate) fn cleanup_network() -> anyhow::Result<()> {
     ip(&["link", "delete", BRIDGE_NAME]).context("removing bridge device")?;
-    ip(&["link", "delete", VETH_HOST]).context("removing host veth side")?;
 
     Ok(())
 }
