@@ -19,14 +19,13 @@ fn ip(args: &[&str]) -> anyhow::Result<()> {
 }
 
 fn ips_from_cidr(netw: &Ipv4Cidr) -> anyhow::Result<(Ipv4Addr, Ipv4Addr)> {
-    let host_ip = netw
-        .iter()
+    let mut cidr_iter = netw.iter();
+    let host_ip = cidr_iter
         .nth(1)
         .context("get host address from cidr")?
         .address();
-    let container_ip = netw
-        .iter()
-        .nth(2)
+    let container_ip = cidr_iter
+        .next()
         .context("get container address from cidr")?
         .address();
     Ok((host_ip, container_ip))
