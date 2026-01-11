@@ -13,7 +13,7 @@ const VETH_CONTAINER: &str = "veth0c0";
 fn ip(args: &[&str]) -> anyhow::Result<()> {
     Command::new("/sbin/ip")
         .args(args)
-        .output()
+        .status()
         .context(format!("Failed to execute ip {:?}", args))?;
     Ok(())
 }
