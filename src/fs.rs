@@ -4,7 +4,8 @@ use nix::{
     unistd::{chdir, pivot_root},
 };
 use std::{
-    fs::{create_dir_all, remove_dir, remove_dir_all},
+    fs::{Permissions, create_dir_all, remove_dir, remove_dir_all},
+    os::unix::fs::PermissionsExt,
     path::Path,
 };
 
@@ -15,14 +16,14 @@ fn recreate_dir<P: AsRef<Path>>(dir: P) -> anyhow::Result<()> {
     }
     std::fs::create_dir_all(dir.as_ref())
         .with_context(|| format!("failed to create {:?}", dir.as_ref()))?;
+    std::fs::set_permissions(dir.as_ref(), Permissions::from_mode(0o777))
+        .with_context(|| format!("failed to chmod {:?}", dir.as_ref()))?;
     Ok(())
 }
 
-fn create_overlay_dirs(root: &str) -> anyhow::Result<(String, String, String, String)> {
+fn get_overlay_dirs(root: &str) -> anyhow::Result<(String, String, String, String)> {
     let lower_dirs = find_lower_layers(root)?;
-
     let upper_dir = format!("{}/upper", root);
-    recreate_dir(&upper_dir)?;
 
     let lower = if lower_dirs.is_empty() {
         format!("{}/rootfs", root)
@@ -32,8 +33,6 @@ fn create_overlay_dirs(root: &str) -> anyhow::Result<(String, String, String, St
 
     let workdir = Path::new(root).join("workdir");
     let rootfs = Path::new(root).join("mount");
-    recreate_dir(&workdir)?;
-    recreate_dir(&rootfs)?;
 
     Ok((
         lower,
@@ -41,6 +40,18 @@ fn create_overlay_dirs(root: &str) -> anyhow::Result<(String, String, String, St
         workdir.to_string_lossy().to_string(),
         rootfs.to_string_lossy().to_string(),
     ))
+}
+
+pub(crate) fn create_overlay_dirs(root: &str) -> anyhow::Result<()> {
+    let upper_dir = format!("{}/upper", root);
+    recreate_dir(&upper_dir)?;
+
+    let workdir = Path::new(root).join("workdir");
+    let rootfs = Path::new(root).join("mount");
+    recreate_dir(&workdir)?;
+    recreate_dir(&rootfs)?;
+
+    Ok(())
 }
 
 pub fn find_lower_layers(root: &str) -> anyhow::Result<String> {
@@ -81,7 +92,7 @@ pub(crate) fn create_container_filesystem(root: &str) -> anyhow::Result<()> {
     )
     .context("private propagation for /")?;
 
-    let (lower, upper, workdir, rootdir) = create_overlay_dirs(root)?;
+    let (lower, upper, workdir, rootdir) = get_overlay_dirs(root)?;
 
     let rootfs = Path::new(&rootdir);
 

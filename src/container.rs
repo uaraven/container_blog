@@ -18,10 +18,15 @@ use crate::net;
 
 const STACK_SIZE: usize = 1024 * 1024;
 
-fn child(command: &str, args: &[String], is_parent_root: bool) -> anyhow::Result<()> {
+fn child(
+    command: &str,
+    args: &[String],
+    netw: &Ipv4Cidr,
+    is_parent_root: bool,
+) -> anyhow::Result<()> {
     fs::create_container_filesystem("fs")?;
 
-    net::bring_up_container_net(is_parent_root)?;
+    net::bring_up_container_net(netw, is_parent_root)?;
 
     use nix::unistd::execve;
     use std::ffi::CString;
@@ -50,6 +55,7 @@ fn child(command: &str, args: &[String], is_parent_root: bool) -> anyhow::Result
         let pair = format!("{}={}", key, updated_value);
         c_env.push(CString::new(pair).context("failed to convert env var to CString")?);
     }
+
     // execve replaces the current process, so this only returns on error
     execve(&cmd_cstring, &c_args, &c_env).context("failed to execute command")?;
 
@@ -65,6 +71,9 @@ pub fn run_in_container(command: &str, args: &[String]) -> anyhow::Result<()> {
         | CloneFlags::CLONE_NEWNET;
     // allocate stack for the child process
     let mut stack = vec![0u8; STACK_SIZE];
+
+    let container_net_cidr =
+        Ipv4Cidr::new(Ipv4Addr::new(192, 168, 200, 0), 24).context("invalid CIDR")?;
 
     let uid = unsafe { geteuid() };
     let gid = unsafe { getegid() };
@@ -98,7 +107,7 @@ pub fn run_in_container(command: &str, args: &[String]) -> anyhow::Result<()> {
                 let is_parent_root = uid == 0;
 
                 // This runs in the child process with PID 1 in the new namespace
-                if let Err(e) = child(command, args, is_parent_root) {
+                if let Err(e) = child(command, args, &container_net_cidr, is_parent_root) {
                     eprintln!("child process failed: {:#}", e);
                     return 1;
                 };
@@ -117,9 +126,9 @@ pub fn run_in_container(command: &str, args: &[String]) -> anyhow::Result<()> {
     write_proc_file(child_pid, "setgroups", "deny\n")?;
     write_proc_file(child_pid, "gid_map", &format!("0 {} 1\n", gid))?;
 
+    fs::create_overlay_dirs("fs")?;
+
     if uid == 0 {
-        let container_net_cidr =
-            Ipv4Cidr::new(Ipv4Addr::new(192, 160, 200, 0), 24).context("invalid CIDR")?;
         net::setup_network_host(&container_net_cidr)?;
         net::move_into_container(child_pid)?;
     }
