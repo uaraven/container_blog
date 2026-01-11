@@ -4,8 +4,7 @@ use nix::{
     unistd::{chdir, pivot_root},
 };
 use std::{
-    fs::{Permissions, create_dir_all, remove_dir, remove_dir_all},
-    os::unix::fs::PermissionsExt,
+    fs::{create_dir_all, remove_dir, remove_dir_all},
     path::Path,
 };
 
@@ -16,8 +15,6 @@ fn recreate_dir<P: AsRef<Path>>(dir: P) -> anyhow::Result<()> {
     }
     std::fs::create_dir_all(dir.as_ref())
         .with_context(|| format!("failed to create {:?}", dir.as_ref()))?;
-    std::fs::set_permissions(dir.as_ref(), Permissions::from_mode(0o777))
-        .with_context(|| format!("failed to chmod {:?}", dir.as_ref()))?;
     Ok(())
 }
 

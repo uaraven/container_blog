@@ -119,7 +119,6 @@ pub(crate) fn bring_up_container_net(netw: &Ipv4Cidr, veth_up: bool) -> anyhow::
             VETH_CONTAINER,
         ])
         .context("adding IP address to container veth")?;
-        println!("adding IP {} address to container veth", container_ip);
 
         // bring container side up
         ip(&["link", "set", "dev", VETH_CONTAINER, "up"])
