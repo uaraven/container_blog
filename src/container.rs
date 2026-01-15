@@ -15,7 +15,7 @@ use nix::{
         signalfd::SignalFd,
         wait::{WaitPidFlag, WaitStatus, waitpid},
     },
-    unistd::{ForkResult, Pid, close, fork, pipe, read, write},
+    unistd::{ForkResult, Pid, close, fork, pipe, read, sethostname, write},
 };
 
 use crate::fs;
@@ -23,18 +23,24 @@ use crate::net;
 
 const STACK_SIZE: usize = 1024 * 1024;
 
-fn child(
-    command: &str,
-    args: &[String],
-    netw: &Ipv4Cidr,
+struct ContainerConfig {
     is_parent_root: bool,
-) -> anyhow::Result<()> {
-    if !is_parent_root {
+    network_cidr: Ipv4Cidr,
+    hostname: Option<String>,
+    drop_caps: bool,
+}
+
+fn child(command: &str, args: &[String], config: &ContainerConfig) -> anyhow::Result<()> {
+    if !config.is_parent_root {
         fs::create_overlay_dirs("fs")?;
     }
     fs::create_container_filesystem("fs")?;
 
-    net::bring_up_container_net(netw, is_parent_root)?;
+    net::bring_up_container_net(&config.network_cidr, config.is_parent_root)?;
+
+    if let Some(hostname) = &config.hostname {
+        sethostname(hostname.as_str())?;
+    }
 
     use nix::unistd::execve;
     use std::ffi::CString;
@@ -64,7 +70,9 @@ fn child(
         c_env.push(CString::new(pair).context("failed to convert env var to CString")?);
     }
 
-    drop_caps()?;
+    if config.drop_caps {
+        drop_caps()?;
+    }
 
     match unsafe { fork() }.context("failed to fork")? {
         ForkResult::Child => {
@@ -128,10 +136,6 @@ fn drop_caps() -> anyhow::Result<()> {
     for cap in caps_drop {
         caps::drop(None, CapSet::Bounding, cap)
             .context(format!("failed to drop bounding capability {}", cap))?;
-        caps::drop(None, CapSet::Effective, cap)
-            .context(format!("failed to drop effective capability {}", cap))?;
-        caps::drop(None, CapSet::Permitted, cap)
-            .context(format!("failed to drop permitted capability {}", cap))?;
     }
     nix::sys::prctl::set_no_new_privs()?;
     Ok(())
@@ -183,12 +187,18 @@ fn run_init(child: Pid) -> anyhow::Result<()> {
     }
 }
 
-pub fn run_in_container(command: &str, args: &[String]) -> anyhow::Result<()> {
+pub fn run_in_container(
+    command: &str,
+    args: &[String],
+    hostname: &Option<String>,
+    drop_caps: bool,
+) -> anyhow::Result<()> {
     // clone flags
     let clone_flags = CloneFlags::CLONE_NEWPID
         | CloneFlags::CLONE_NEWUSER
         | CloneFlags::CLONE_NEWNS
-        | CloneFlags::CLONE_NEWNET;
+        | CloneFlags::CLONE_NEWNET
+        | CloneFlags::CLONE_NEWUTS;
     // allocate stack for the child process
     let mut stack = vec![0u8; STACK_SIZE];
 
@@ -223,10 +233,15 @@ pub fn run_in_container(command: &str, args: &[String]) -> anyhow::Result<()> {
                     eprint!("failed to sync with parent {}", e);
                     return 1;
                 }
-                let is_parent_root = uid == 0;
 
+                let config = ContainerConfig {
+                    is_parent_root: uid == 0,
+                    network_cidr: container_net_cidr,
+                    hostname: hostname.clone(),
+                    drop_caps: drop_caps,
+                };
                 // This runs in the child process with PID 1 in the new namespace
-                if let Err(e) = child(command, args, &container_net_cidr, is_parent_root) {
+                if let Err(e) = child(command, args, &config) {
                     eprintln!("child process failed: {:#}", e);
                     return 1;
                 };

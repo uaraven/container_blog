@@ -12,6 +12,14 @@ use container::run_in_container;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    /// Hostname for the container
+    #[arg(long)]
+    hostname: Option<String>,
+
+    /// Drop all the capabilities for the command
+    #[arg(long)]
+    drop_caps: bool,
+
     /// Command to execute in the container
     #[arg(required = true)]
     command: String,
@@ -24,7 +32,7 @@ struct Args {
 fn main() -> ExitCode {
     let args = Args::parse();
 
-    if let Err(e) = run_in_container(&args.command, &args.args) {
+    if let Err(e) = run_in_container(&args.command, &args.args, &args.hostname, args.drop_caps) {
         eprintln!("Error: {:#}", e);
         return ExitCode::FAILURE;
     }
