@@ -5,12 +5,17 @@ use std::{
 
 use anyhow::Context;
 
+use caps::{CapSet, Capability};
 use cidr::Ipv4Cidr;
 use libc::{getegid, geteuid};
 use nix::{
     sched::{CloneFlags, clone},
-    sys::signal::Signal,
-    unistd::{Pid, close, pipe, read, write},
+    sys::{
+        signal::{SigSet, Signal, kill},
+        signalfd::SignalFd,
+        wait::{WaitPidFlag, WaitStatus, waitpid},
+    },
+    unistd::{ForkResult, Pid, close, fork, pipe, read, write},
 };
 
 use crate::fs;
@@ -24,6 +29,9 @@ fn child(
     netw: &Ipv4Cidr,
     is_parent_root: bool,
 ) -> anyhow::Result<()> {
+    if !is_parent_root {
+        fs::create_overlay_dirs("fs")?;
+    }
     fs::create_container_filesystem("fs")?;
 
     net::bring_up_container_net(netw, is_parent_root)?;
@@ -56,11 +64,123 @@ fn child(
         c_env.push(CString::new(pair).context("failed to convert env var to CString")?);
     }
 
-    // execve replaces the current process, so this only returns on error
-    execve(&cmd_cstring, &c_args, &c_env).context("failed to execute command")?;
+    drop_caps()?;
 
-    // This line is never reached if execve succeeds
-    unreachable!()
+    match unsafe { fork() }.context("failed to fork")? {
+        ForkResult::Child => {
+            // execve replaces the current process, so this only returns on error
+            execve(&cmd_cstring, &c_args, &c_env).context("failed to execute command")?;
+
+            // This line is never reached if execve succeeds
+            unreachable!()
+        }
+        ForkResult::Parent { child } => {
+            run_init(child)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn drop_caps() -> anyhow::Result<()> {
+    let caps_drop = [
+        Capability::CAP_AUDIT_CONTROL,
+        Capability::CAP_AUDIT_READ,
+        Capability::CAP_AUDIT_WRITE,
+        Capability::CAP_BPF,
+        Capability::CAP_CHECKPOINT_RESTORE,
+        Capability::CAP_DAC_OVERRIDE,
+        Capability::CAP_DAC_READ_SEARCH,
+        Capability::CAP_FOWNER,
+        Capability::CAP_FSETID,
+        Capability::CAP_IPC_LOCK,
+        Capability::CAP_IPC_OWNER,
+        Capability::CAP_KILL,
+        Capability::CAP_LEASE,
+        Capability::CAP_LINUX_IMMUTABLE,
+        Capability::CAP_MAC_ADMIN,
+        Capability::CAP_MAC_OVERRIDE,
+        Capability::CAP_MKNOD,
+        Capability::CAP_NET_ADMIN,
+        Capability::CAP_NET_BIND_SERVICE,
+        Capability::CAP_NET_BROADCAST,
+        Capability::CAP_NET_RAW,
+        Capability::CAP_SETGID,
+        Capability::CAP_SETUID,
+        Capability::CAP_SYS_BOOT,
+        Capability::CAP_SYS_CHROOT,
+        Capability::CAP_SYS_MODULE,
+        Capability::CAP_SYS_NICE,
+        Capability::CAP_SYS_PACCT,
+        Capability::CAP_SYS_PTRACE,
+        Capability::CAP_SYS_RAWIO,
+        Capability::CAP_SYS_RESOURCE,
+        Capability::CAP_SYS_TIME,
+        Capability::CAP_SYS_TTY_CONFIG,
+        Capability::CAP_WAKE_ALARM,
+        Capability::CAP_SYSLOG,
+        Capability::CAP_BLOCK_SUSPEND,
+        Capability::CAP_PERFMON,
+        Capability::CAP_SETFCAP,
+        Capability::CAP_SYS_ADMIN,
+        Capability::CAP_SETPCAP,
+    ];
+    for cap in caps_drop {
+        caps::drop(None, CapSet::Bounding, cap)
+            .context(format!("failed to drop bounding capability {}", cap))?;
+        caps::drop(None, CapSet::Effective, cap)
+            .context(format!("failed to drop effective capability {}", cap))?;
+        caps::drop(None, CapSet::Permitted, cap)
+            .context(format!("failed to drop permitted capability {}", cap))?;
+    }
+    nix::sys::prctl::set_no_new_privs()?;
+    Ok(())
+}
+
+fn reap_zombies(child: Pid) {
+    loop {
+        match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::Exited(pid, status)) if pid == child => {
+                println!("child exited with status {}", status);
+                std::process::exit(status);
+            }
+            Ok(WaitStatus::Signaled(pid, sig, _)) if pid == child => {
+                println!("child received signal {}", sig);
+                std::process::exit(128 + sig as i32);
+            }
+            Ok(_) => break,
+            Err(nix::errno::Errno::ECHILD) => break,
+            Err(err) => {
+                eprintln!("waitpid error: {}", err);
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+fn run_init(child: Pid) -> anyhow::Result<()> {
+    let _ = nix::sys::prctl::set_child_subreaper(true);
+    let mut signal_mask = SigSet::empty();
+    signal_mask.add(Signal::SIGTERM);
+    signal_mask.add(Signal::SIGINT);
+    signal_mask.add(Signal::SIGQUIT);
+    signal_mask.add(Signal::SIGCHLD);
+    signal_mask.thread_block().context("signal therad_block")?;
+
+    let signal_fd = SignalFd::new(&signal_mask)?;
+
+    loop {
+        let signal_info = signal_fd.read_signal()?.unwrap();
+        let signal = Signal::try_from(signal_info.ssi_signo as i32).unwrap();
+        match signal {
+            Signal::SIGCHLD => {
+                reap_zombies(child);
+            }
+            _ => {
+                kill(child, signal)?;
+            }
+        }
+    }
 }
 
 pub fn run_in_container(command: &str, args: &[String]) -> anyhow::Result<()> {
@@ -103,7 +223,6 @@ pub fn run_in_container(command: &str, args: &[String]) -> anyhow::Result<()> {
                     eprint!("failed to sync with parent {}", e);
                     return 1;
                 }
-
                 let is_parent_root = uid == 0;
 
                 // This runs in the child process with PID 1 in the new namespace
@@ -126,9 +245,9 @@ pub fn run_in_container(command: &str, args: &[String]) -> anyhow::Result<()> {
     write_proc_file(child_pid, "setgroups", "deny\n")?;
     write_proc_file(child_pid, "gid_map", &format!("0 {} 1\n", gid))?;
 
-    fs::create_overlay_dirs("fs")?;
-
     if uid == 0 {
+        fs::create_overlay_dirs("fs")?;
+
         net::setup_network_host(&container_net_cidr)?;
         net::move_into_container(child_pid)?;
     }
