@@ -13,8 +13,8 @@ use nix::{
     unistd::{Pid, close, pipe, read, write},
 };
 
-use crate::fs;
 use crate::net;
+use crate::{cgroups::Cgroup, fs};
 
 const STACK_SIZE: usize = 1024 * 1024;
 
@@ -63,7 +63,12 @@ fn child(
     unreachable!()
 }
 
-pub fn run_in_container(command: &str, args: &[String]) -> anyhow::Result<()> {
+pub fn run_in_container(
+    command: &str,
+    args: &[String],
+    cpu: &Option<String>,
+    mem: &Option<String>,
+) -> anyhow::Result<()> {
     // clone flags
     let clone_flags = CloneFlags::CLONE_NEWPID
         | CloneFlags::CLONE_NEWUSER
@@ -128,9 +133,17 @@ pub fn run_in_container(command: &str, args: &[String]) -> anyhow::Result<()> {
 
     fs::create_overlay_dirs("fs")?;
 
+    // keep variable here, so if we use cgroup, it will be dropped automatically
+    // when run_in_container finishes
+    let mut _cgroup: Option<Cgroup> = None;
+
     if uid == 0 {
         net::setup_network_host(&container_net_cidr)?;
         net::move_into_container(child_pid)?;
+
+        let cg = Cgroup::new(cpu, mem)?;
+        cg.add_process(child_pid.as_raw())?;
+        _cgroup = Some(cg);
     }
 
     write(&write_fd, b"1")?;

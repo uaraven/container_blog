@@ -1,3 +1,4 @@
+mod cgroups;
 mod container;
 mod fs;
 mod net;
@@ -12,6 +13,14 @@ use container::run_in_container;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    /// CPU shares for the container, e.g. 0.5, 1, etc
+    #[arg(short, long)]
+    cpu: Option<String>,
+
+    /// Memory limit for the container in bytes or Mb/Gb, e.g. 128M, 1Gb, etc
+    #[arg(short, long)]
+    mem: Option<String>,
+
     /// Command to execute in the container
     #[arg(required = true)]
     command: String,
@@ -24,7 +33,7 @@ struct Args {
 fn main() -> ExitCode {
     let args = Args::parse();
 
-    if let Err(e) = run_in_container(&args.command, &args.args) {
+    if let Err(e) = run_in_container(&args.command, &args.args, &args.cpu, &args.mem) {
         eprintln!("Error: {:#}", e);
         return ExitCode::FAILURE;
     }
