@@ -173,10 +173,10 @@ fn parse_cpu_quota(cpu: &str) -> Result<String> {
 ///
 /// Returns Ok(()) if valid, Err otherwise.
 fn validate_memory_limit(limit: &str) -> Result<()> {
-    let re = regex::Regex::new(r"^(?i:(max|\d+|\d+)(?:k|m|g|ki|mi|gi))$")?;
+    let re = regex::Regex::new(r"^(?i:max|[1-9]\d*|[1-9]\d*(?:k|m|g|kb|mb|gb))$")?;
     if !re.is_match(limit) {
         anyhow::bail!(
-            "Unsupported memory limit '{}'. Use: max, bytes, or units K/M/G/Ki/Mi/Gi",
+            "Unsupported memory limit '{}'. Use: max, bytes, or units K/M/G/Kb/Mb/Gb",
             limit
         );
     }
@@ -215,13 +215,13 @@ mod tests {
         assert!(validate_memory_limit("2G").is_ok());
 
         // IEC units
-        assert!(validate_memory_limit("1Ki").is_ok());
-        assert!(validate_memory_limit("10Mi").is_ok());
-        assert!(validate_memory_limit("2Gi").is_ok());
+        assert!(validate_memory_limit("1Kb").is_ok());
+        assert!(validate_memory_limit("10Mb").is_ok());
+        assert!(validate_memory_limit("2Gb").is_ok());
 
         // Case-insensitive units
         assert!(validate_memory_limit("5m").is_ok());
-        assert!(validate_memory_limit("3gi").is_ok());
+        assert!(validate_memory_limit("3gb").is_ok());
     }
 
     #[test]
@@ -234,8 +234,8 @@ mod tests {
         assert!(validate_memory_limit("K").is_err());
 
         // Unsupported units
-        assert!(validate_memory_limit("100KB").is_err());
-        assert!(validate_memory_limit("1TB").is_err());
+        assert!(validate_memory_limit("100Ki").is_err());
+        assert!(validate_memory_limit("1Ti").is_err());
         assert!(validate_memory_limit("1TiB").is_err());
 
         // Non-digit numeric part
