@@ -91,52 +91,14 @@ fn child(command: &str, args: &[String], config: &ContainerConfig) -> anyhow::Re
 }
 
 fn drop_caps() -> anyhow::Result<()> {
-    let caps_drop = [
-        Capability::CAP_AUDIT_CONTROL,
-        Capability::CAP_AUDIT_READ,
-        Capability::CAP_AUDIT_WRITE,
-        Capability::CAP_BPF,
-        Capability::CAP_CHECKPOINT_RESTORE,
-        Capability::CAP_DAC_OVERRIDE,
-        Capability::CAP_DAC_READ_SEARCH,
-        Capability::CAP_FOWNER,
-        Capability::CAP_FSETID,
-        Capability::CAP_IPC_LOCK,
-        Capability::CAP_IPC_OWNER,
-        Capability::CAP_KILL,
-        Capability::CAP_LEASE,
-        Capability::CAP_LINUX_IMMUTABLE,
-        Capability::CAP_MAC_ADMIN,
-        Capability::CAP_MAC_OVERRIDE,
-        Capability::CAP_MKNOD,
-        Capability::CAP_NET_ADMIN,
-        Capability::CAP_NET_BIND_SERVICE,
-        Capability::CAP_NET_BROADCAST,
-        Capability::CAP_NET_RAW,
-        Capability::CAP_SETGID,
-        Capability::CAP_SETUID,
-        Capability::CAP_SYS_BOOT,
-        Capability::CAP_SYS_CHROOT,
-        Capability::CAP_SYS_MODULE,
-        Capability::CAP_SYS_NICE,
-        Capability::CAP_SYS_PACCT,
-        Capability::CAP_SYS_PTRACE,
-        Capability::CAP_SYS_RAWIO,
-        Capability::CAP_SYS_RESOURCE,
-        Capability::CAP_SYS_TIME,
-        Capability::CAP_SYS_TTY_CONFIG,
-        Capability::CAP_WAKE_ALARM,
-        Capability::CAP_SYSLOG,
-        Capability::CAP_BLOCK_SUSPEND,
-        Capability::CAP_PERFMON,
-        Capability::CAP_SETFCAP,
-        Capability::CAP_SYS_ADMIN,
-        Capability::CAP_SETPCAP,
-    ];
+    let mut caps_drop = caps::all();
+    caps_drop.remove(&Capability::CAP_CHOWN);
+
     for cap in caps_drop {
         caps::drop(None, CapSet::Bounding, cap)
             .context(format!("failed to drop bounding capability {}", cap))?;
     }
+
     nix::sys::prctl::set_no_new_privs()?;
     Ok(())
 }
