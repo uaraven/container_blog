@@ -18,8 +18,8 @@ use nix::{
     unistd::{ForkResult, Pid, close, fork, pipe, read, sethostname, write},
 };
 
-use crate::fs;
 use crate::net;
+use crate::{cgroups::Cgroup, fs};
 
 const STACK_SIZE: usize = 1024 * 1024;
 
@@ -190,6 +190,8 @@ fn run_init(child: Pid) -> anyhow::Result<()> {
 pub fn run_in_container(
     command: &str,
     args: &[String],
+    cpu: &Option<String>,
+    mem: &Option<String>,
     hostname: &Option<String>,
     drop_caps: bool,
 ) -> anyhow::Result<()> {
@@ -260,11 +262,19 @@ pub fn run_in_container(
     write_proc_file(child_pid, "setgroups", "deny\n")?;
     write_proc_file(child_pid, "gid_map", &format!("0 {} 1\n", gid))?;
 
+    // keep variable here, so if we use cgroup, it will be dropped automatically
+    // when run_in_container finishes
+    let mut _cgroup: Option<Cgroup> = None;
+
     if uid == 0 {
         fs::create_overlay_dirs("fs")?;
 
         net::setup_network_host(&container_net_cidr)?;
         net::move_into_container(child_pid)?;
+
+        let cg = Cgroup::new(cpu, mem)?;
+        cg.add_process(child_pid.as_raw())?;
+        _cgroup = Some(cg);
     }
 
     write(&write_fd, b"1")?;
