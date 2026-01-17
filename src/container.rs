@@ -136,8 +136,15 @@ fn run_init(child: Pid) -> anyhow::Result<()> {
     let signal_fd = SignalFd::new(&signal_mask)?;
 
     loop {
-        let signal_info = signal_fd.read_signal()?.unwrap();
-        let signal = Signal::try_from(signal_info.ssi_signo as i32).unwrap();
+        let signal_info = signal_fd
+            .read_signal()?
+            .context("failed to read signal from fd")?;
+        let signal = Signal::try_from(signal_info.ssi_signo as i32).with_context(|| {
+            format!(
+                "failed to convert signal number {} to Signal",
+                signal_info.ssi_signo
+            )
+        })?;
         match signal {
             Signal::SIGCHLD => {
                 reap_zombies(child);
@@ -202,7 +209,7 @@ pub fn run_in_container(
                     is_parent_root: uid == 0,
                     network_cidr: container_net_cidr,
                     hostname: hostname.clone(),
-                    drop_caps: drop_caps,
+                    drop_caps,
                 };
                 // This runs in the child process with PID 1 in the new namespace
                 if let Err(e) = child(command, args, &config) {
