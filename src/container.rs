@@ -131,7 +131,7 @@ fn run_init(child: Pid) -> anyhow::Result<()> {
     signal_mask.add(Signal::SIGINT);
     signal_mask.add(Signal::SIGQUIT);
     signal_mask.add(Signal::SIGCHLD);
-    signal_mask.thread_block().context("signal therad_block")?;
+    signal_mask.thread_block().context("signal thread_block")?;
 
     let signal_fd = SignalFd::new(&signal_mask)?;
 

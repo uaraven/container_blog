@@ -20,7 +20,6 @@ struct Args {
     /// Drop all the capabilities for the command
     #[arg(long)]
     drop_caps: bool,
-    
     /// CPU shares for the container, e.g. 0.5, 1, etc
     #[arg(short, long)]
     cpu: Option<String>,
