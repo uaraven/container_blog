@@ -26,7 +26,7 @@ impl Cgroup {
 
         let cgroup = Cgroup {
             path: cgroup_path,
-            cgroup: String::from("container"),
+            cgroup: String::from("leaf"),
         };
 
         // Ensure base cgroup directory exists and controllers are enabled
@@ -59,7 +59,7 @@ impl Cgroup {
     /// # Arguments
     /// * `pid` - Process ID to add to the cgroup
     pub fn add_process(&self, pid: i32) -> Result<()> {
-        let procs_file = self.path.join("container").join("cgroup.procs");
+        let procs_file = self.path.join(&self.cgroup).join("cgroup.procs");
         fs::write(&procs_file, pid.to_string())
             .with_context(|| format!("Failed to add process {} to cgroup", pid))?;
         Ok(())
@@ -71,7 +71,7 @@ impl Cgroup {
     /// * `path` - Path to the cgroup directory
     /// * `limit` - Memory limit string (e.g., "100M", "1G")
     pub fn set_memory_limit(&self, limit: &str) -> Result<()> {
-        let memory_max = self.path.join(self.cgroup.as_str()).join("memory.max");
+        let memory_max = self.path.join(&self.cgroup).join("memory.max");
         fs::write(&memory_max, limit)
             .with_context(|| format!("Failed to write to {:?}", memory_max))?;
         Ok(())
@@ -86,7 +86,7 @@ impl Cgroup {
         let cpu_quota_str = parse_cpu_quota(quota)
             .with_context(|| format!("Failed to parse CPU quota '{}'", quota))?;
 
-        let cpu_max = self.path.join(self.cgroup.as_str()).join("cpu.max");
+        let cpu_max = self.path.join(&self.cgroup).join("cpu.max");
         fs::write(&cpu_max, cpu_quota_str)
             .with_context(|| format!("Failed to write to {:?}", cpu_max))?;
         Ok(())
@@ -95,7 +95,7 @@ impl Cgroup {
     /// Ensures the base cgroup directory exists and controllers are enabled.
     fn ensure_base_cgroup(&self, need_memory: bool, need_cpu: bool) -> Result<()> {
         // Create cgroup directory if it doesn't exist
-        let cgroup_dir = self.path.join(self.cgroup.as_str());
+        let cgroup_dir = self.path.join(&self.cgroup);
         if !cgroup_dir.exists() {
             fs::create_dir_all(cgroup_dir)
                 .with_context(|| format!("Failed to create base directory at {:?}", self.path))?;
