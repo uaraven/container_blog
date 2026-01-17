@@ -13,6 +13,13 @@ use container::run_in_container;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    /// Hostname for the container
+    #[arg(long)]
+    hostname: Option<String>,
+
+    /// Drop all the capabilities for the command
+    #[arg(long)]
+    drop_caps: bool,
     /// CPU shares for the container, e.g. 0.5, 1, etc
     #[arg(short, long)]
     cpu: Option<String>,
@@ -33,7 +40,7 @@ struct Args {
 fn main() -> ExitCode {
     let args = Args::parse();
 
-    if let Err(e) = run_in_container(&args.command, &args.args, &args.cpu, &args.mem) {
+    if let Err(e) = run_in_container(&args.command, &args.args, &args.cpu, &args.mem, &args.hostname, args.drop_caps) {
         eprintln!("Error: {:#}", e);
         return ExitCode::FAILURE;
     }

@@ -5,12 +5,17 @@ use std::{
 
 use anyhow::Context;
 
+use caps::{CapSet, Capability};
 use cidr::Ipv4Cidr;
 use libc::{getegid, geteuid};
 use nix::{
     sched::{CloneFlags, clone},
-    sys::signal::Signal,
-    unistd::{Pid, close, pipe, read, write},
+    sys::{
+        signal::{SigSet, Signal, kill},
+        signalfd::SignalFd,
+        wait::{WaitPidFlag, WaitStatus, waitpid},
+    },
+    unistd::{ForkResult, Pid, close, fork, pipe, read, sethostname, write},
 };
 
 use crate::net;
@@ -18,15 +23,24 @@ use crate::{cgroups::Cgroup, fs};
 
 const STACK_SIZE: usize = 1024 * 1024;
 
-fn child(
-    command: &str,
-    args: &[String],
-    netw: &Ipv4Cidr,
+struct ContainerConfig {
     is_parent_root: bool,
-) -> anyhow::Result<()> {
+    network_cidr: Ipv4Cidr,
+    hostname: Option<String>,
+    drop_caps: bool,
+}
+
+fn child(command: &str, args: &[String], config: &ContainerConfig) -> anyhow::Result<()> {
+    if !config.is_parent_root {
+        fs::create_overlay_dirs("fs")?;
+    }
     fs::create_container_filesystem("fs")?;
 
-    net::bring_up_container_net(netw, is_parent_root)?;
+    net::bring_up_container_net(&config.network_cidr, config.is_parent_root)?;
+
+    if let Some(hostname) = &config.hostname {
+        sethostname(hostname.as_str())?;
+    }
 
     use nix::unistd::execve;
     use std::ffi::CString;
@@ -56,11 +70,90 @@ fn child(
         c_env.push(CString::new(pair).context("failed to convert env var to CString")?);
     }
 
-    // execve replaces the current process, so this only returns on error
-    execve(&cmd_cstring, &c_args, &c_env).context("failed to execute command")?;
+    if config.drop_caps {
+        drop_caps()?;
+    }
 
-    // This line is never reached if execve succeeds
-    unreachable!()
+    match unsafe { fork() }.context("failed to fork")? {
+        ForkResult::Child => {
+            // execve replaces the current process, so this only returns on error
+            execve(&cmd_cstring, &c_args, &c_env).context("failed to execute command")?;
+
+            // This line is never reached if execve succeeds
+            unreachable!()
+        }
+        ForkResult::Parent { child } => {
+            run_init(child)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn drop_caps() -> anyhow::Result<()> {
+    let mut caps_drop = caps::all();
+    caps_drop.remove(&Capability::CAP_CHOWN);
+
+    for cap in caps_drop {
+        caps::drop(None, CapSet::Bounding, cap)
+            .context(format!("failed to drop bounding capability {}", cap))?;
+    }
+
+    nix::sys::prctl::set_no_new_privs()?;
+    Ok(())
+}
+
+fn reap_zombies(child: Pid) {
+    loop {
+        match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::Exited(pid, status)) if pid == child => {
+                println!("child exited with status {}", status);
+                std::process::exit(status);
+            }
+            Ok(WaitStatus::Signaled(pid, sig, _)) if pid == child => {
+                println!("child received signal {}", sig);
+                std::process::exit(128 + sig as i32);
+            }
+            Ok(_) => break,
+            Err(nix::errno::Errno::ECHILD) => break,
+            Err(err) => {
+                eprintln!("waitpid error: {}", err);
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+fn run_init(child: Pid) -> anyhow::Result<()> {
+    let _ = nix::sys::prctl::set_child_subreaper(true);
+    let mut signal_mask = SigSet::empty();
+    signal_mask.add(Signal::SIGTERM);
+    signal_mask.add(Signal::SIGINT);
+    signal_mask.add(Signal::SIGQUIT);
+    signal_mask.add(Signal::SIGCHLD);
+    signal_mask.thread_block().context("signal thread_block")?;
+
+    let signal_fd = SignalFd::new(&signal_mask)?;
+
+    loop {
+        let signal_info = signal_fd
+            .read_signal()?
+            .context("failed to read signal from fd")?;
+        let signal = Signal::try_from(signal_info.ssi_signo as i32).with_context(|| {
+            format!(
+                "failed to convert signal number {} to Signal",
+                signal_info.ssi_signo
+            )
+        })?;
+        match signal {
+            Signal::SIGCHLD => {
+                reap_zombies(child);
+            }
+            _ => {
+                kill(child, signal)?;
+            }
+        }
+    }
 }
 
 pub fn run_in_container(
@@ -68,12 +161,15 @@ pub fn run_in_container(
     args: &[String],
     cpu: &Option<String>,
     mem: &Option<String>,
+    hostname: &Option<String>,
+    drop_caps: bool,
 ) -> anyhow::Result<()> {
     // clone flags
     let clone_flags = CloneFlags::CLONE_NEWPID
         | CloneFlags::CLONE_NEWUSER
         | CloneFlags::CLONE_NEWNS
-        | CloneFlags::CLONE_NEWNET;
+        | CloneFlags::CLONE_NEWNET
+        | CloneFlags::CLONE_NEWUTS;
     // allocate stack for the child process
     let mut stack = vec![0u8; STACK_SIZE];
 
@@ -109,10 +205,14 @@ pub fn run_in_container(
                     return 1;
                 }
 
-                let is_parent_root = uid == 0;
-
+                let config = ContainerConfig {
+                    is_parent_root: uid == 0,
+                    network_cidr: container_net_cidr,
+                    hostname: hostname.clone(),
+                    drop_caps,
+                };
                 // This runs in the child process with PID 1 in the new namespace
-                if let Err(e) = child(command, args, &container_net_cidr, is_parent_root) {
+                if let Err(e) = child(command, args, &config) {
                     eprintln!("child process failed: {:#}", e);
                     return 1;
                 };
@@ -131,13 +231,13 @@ pub fn run_in_container(
     write_proc_file(child_pid, "setgroups", "deny\n")?;
     write_proc_file(child_pid, "gid_map", &format!("0 {} 1\n", gid))?;
 
-    fs::create_overlay_dirs("fs")?;
-
     // keep variable here, so if we use cgroup, it will be dropped automatically
     // when run_in_container finishes
     let mut _cgroup: Option<Cgroup> = None;
 
     if uid == 0 {
+        fs::create_overlay_dirs("fs")?;
+
         net::setup_network_host(&container_net_cidr)?;
         net::move_into_container(child_pid)?;
 
