@@ -26,3 +26,4 @@ The source code is tagged with tags named "a1", "a2", etc corresponding to the b
 - [a4](https://github.com/uaraven/container_blog/commits/a4) - [overlay filesystem](https://voronin.cc/posts/container-mount-overlay/index.html)
 - [netns](https://github.com/uaraven/container_blog/commits/netns) - [Network namespace](https://voronin.cc/posts/container-netns/index.html)
 - [cgroups](https://github.com/uaraven/container_blog/commits/cgroups) - [Resource limits with cgroups](https://voronin.cc/posts/container-cgroups/index.html)
+- [final](https://github.com/uaraven/container_blog/commits/final) - [Final touches](https://voronin.cc/posts/container-final/index.html)
